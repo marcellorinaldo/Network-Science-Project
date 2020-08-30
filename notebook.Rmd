@@ -1,0 +1,987 @@
+---
+title: "Montreal Street Gangs Network Analysis"
+author: "Martina Marcello Rinaldo"
+output: html_notebook
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r results="hide"}
+# imports
+library(readr)
+library(dplyr)
+library(tidyr)
+library(tidygraph)
+library(ggraph)
+library(igraph)
+library(lpSolve)
+library(lpSolveAPI)
+library(kableExtra)
+```
+
+
+
+
+
+# Introduction
+
+This is the project of the course Network Science held at the [University of Udine](https://www.uniud.it). This project aims to analyze a meaningful network to answer some questions using tools and methodologies presented in the course.
+
+The chosen network is **Montreal Street Gangs**, available at [UCINET Software](https://sites.google.com/site/ucinetsoftware/datasets/covert-networks/montrealstreetgangs). This dataset contains data obtained from the Montreal Police’s central intelligence base and reconstructs the organization of drug-distribution operations in Montreal North. The network of street gangs is a *social network*, where ties are relations between gangs (as reported in focus groups/interviews with gang members). Unfortunately, these relations are not specified to be of rivalry or cooperation, so in this project, ties are assumed to represent a positive relationship.
+
+
+
+
+
+# The Network Data
+
+Network data is composed of two CSV datasets:
+
+* `MONTREALGANG.csv`: a matrix of gang - gang entries, which takes value 1 if the two gangs are in relation
+* `MONTREALGANG_ATTR.csv`: gangs attribute data
+
+```{r results="hide"}
+attributes <- read.csv("./data/MONTREALGANG_ATTR.csv")
+gangs <- read_csv("./data/MONTREALGANG.csv")
+```
+
+The attributes data are:
+
+* `Allegiances`: each gang can be associated to one of the main factions that rule criminality in Montreal. The possible factions are:
+  
+  1. Bloods
+  2. Crips
+  3. Other
+  
+* `Ethnicity`: the main ethnicity of a gang can be:
+
+  1. Hispanic
+  2. Afro-Canadian
+  3. Caucasian
+  4. Asian
+  5. No main association/mixed
+  
+* `Territories`: the investigations were conducted in Montreal North, that in turn is divided into three main territories:
+
+  1. Downtown
+  2. East
+  3. West
+
+Missing values in the attributes dataset are coded as 99.
+
+The `gangs` dataset contains the matrix that represents the network. The ties are undirected and represent a relationship between two gangs.
+
+```{r}
+# counting number of gangs
+nrow(attributes)
+# counting number of edges (symmetric)
+round(sum(gangs == 1) / 2)
+```
+
+There are in total 35 gangs and 76 edges.
+
+## Data Preparation
+
+`tidygraph` is used to provide a tidy framework for the network data. Using this approach, the aim is to create two tidy data frames, one describing the node data and one describing the edge data.
+
+Some operations on the `attributes` dataset are performed to convert attribute numbers to more meaningful values. The obtained data structure is:
+
+```{r}
+# allegiance factors
+attributes$Allegiances[attributes$Allegiances == 99] <- NA
+attributes$Allegiances[attributes$Allegiances == 1] <- "Bloods"
+attributes$Allegiances[attributes$Allegiances == 2] <- "Crips"
+attributes$Allegiances[attributes$Allegiances == 3] <- "Other"
+
+# ethnicity factors
+attributes$Ethnicity[attributes$Ethnicity == 99] <- NA
+attributes$Ethnicity[attributes$Ethnicity == 1] <- "Hispanic"
+attributes$Ethnicity[attributes$Ethnicity == 2] <- "Afro-Canadian"
+attributes$Ethnicity[attributes$Ethnicity == 3] <- "Caucasian"
+attributes$Ethnicity[attributes$Ethnicity == 4] <- "Asian"
+attributes$Ethnicity[attributes$Ethnicity == 5] <- "Mixed"
+
+# territory factors
+attributes$Territories[attributes$Territories == 99] <- NA
+attributes$Territories[attributes$Territories == 1] <- "Downtown"
+attributes$Territories[attributes$Territories == 2] <- "East"
+attributes$Territories[attributes$Territories == 3] <- "West"
+
+# giving proper names to variables
+colnames(attributes) <- c("name", "allegiance", "ethnicity", "territory")
+
+# values as factors
+attributes$allegiance <- as.factor(attributes$allegiance)
+attributes$ethnicity <- as.factor(attributes$ethnicity)
+attributes$territory <- as.factor(attributes$territory)
+
+# prepending the node id and create the nodes dataset
+nodes <- cbind(id = c(1:nrow(attributes)), attributes)
+head(nodes, 5) %>%
+  kable() %>%
+  kable_styling(full_width = FALSE, bootstrap_options = "striped")
+```
+
+The `gangs` dataset contains the matrix that represents the network. It is turned into a more compact dataframe where each edge must be encoded in a `from` and a `to` column, so it can be used to create a graph using `tidygraph`.
+
+```{r}
+# creating the vectors for the edges dataframe
+from <- integer()
+to <- integer()
+type <- factor()
+
+for(i in 1:nrow(gangs)) {
+  # undirected case, symmetric matrix
+  for(j in i:ncol(gangs)) {
+    # if there is an edge between gangs i and j
+    if(gangs[i, j] == 1 & i<j) {
+      # insert new values
+      from <- append(from, i)
+      to <- append(to, j-1) # j=1 corresponds to the name column
+      # assigning a type to the edges, according to the from gang allegiance
+      type <- append(type, nodes[i, 3])
+    }
+  }
+}
+
+# create the dataframe
+edges <- data.frame(from, to, type)
+head(edges, 5) %>%
+  kable() %>%
+  kable_styling(full_width = FALSE, bootstrap_options = "striped")
+```
+
+
+
+
+
+# Data Challenge
+
+The `nodes` and `edges` dataset are tidy and ready to be used. In the following a first network visualization:
+
+```{r fig.align="center", out.width="100%"}
+# creating the network
+net <- tbl_graph(nodes = nodes, edges = edges, directed = FALSE)
+```
+
+```{r fig.align = "center", out.width = "100%", echo=FALSE}
+# visualization
+ggraph(net, layout = "nicely") +
+  geom_edge_link(alpha = 0.2) +
+  geom_node_point(aes(color = allegiance), size = 4) +
+  geom_node_text(aes(label = name), alpha = 0.8, repel = TRUE) +
+  labs(title = "Montreal Street Gangs",
+       colour = "Allegiance") +
+  theme_void()
+```
+
+The network analysis done in this work should give an answer to the following questions:
+
+1. Which are the most important gangs?
+2. Which are the most powerful gangs? Do they coincide with the most important?
+3. Which is the most powerful faction between *Bloods* and *Crips*?
+4. Are the factions divided by ethnicity of its members?
+5. Are connected gangs likely to be of the same faction?
+6. If a gang A is in relation with gangs B and C, what is the probability that also gangs B and C are in relation?
+7. Are there communities that emerge from the network? If so, which are the leaders of those communities?
+8. Which gangs should the police attack to damage the most of the network?
+
+
+
+
+
+## 1. Which are the most important gangs?
+
+This question aims to identify the gangs that have the highest number of relations with other gangs, or the most important ones. Those gangs are supposed to give a large contribute to the criminality of Montreal.
+
+Several *centrality measures* are used to answer this question, since different centralities take in consideration different characteristics. The combined results should give a good picture of the most important gangs.
+
+### Degree Centrality
+
+```{r}
+# degree centrality
+nodes <- mutate(nodes, deg_cen = degree(net))
+```
+
+```{r fig.align="center", out.width="100%"}
+# plotting the graph
+net <- tbl_graph(nodes = nodes, edges = edges, directed = FALSE)
+ggraph(net, layout = "nicely") +
+  geom_edge_link(alpha = 0.2) +
+  geom_node_point(aes(color = deg_cen), size = nodes$deg_cen) +
+  geom_node_text(aes(label = name), repel = TRUE, alpha = 0.8) +
+  labs(title = "Gangs Degrees",
+       colour = "Degree centrality") +
+  theme_void()
+
+# print the 10 highest-degree nodes
+nodes[order(-nodes$deg_cen),] %>%
+  select(name, deg_cen) %>%
+  head(10) %>%
+  kable() %>%
+  kable_styling(full_width = FALSE, bootstrap_options = "striped")
+```
+
+The gangs *146*, *DPC*, and *50 Niggaz* are the gangs that have the most relationships with others.
+
+### Betweenness Centrality
+
+Next, betweenness centrality is computed. High betweenness may have considerable influence within the network because they control information (or goods) passing between others. They are also the ones whose removal from the network will most disrupt communications between other vertices.
+
+```{r}
+# betweenness centrality
+nodes <- mutate(nodes, bet_cen = round(betweenness(net), 2))
+```
+
+```{r fig.align="center", out.width="100%"}
+# plotting the graph
+net <- tbl_graph(nodes = nodes, edges = edges, directed = FALSE)
+ggraph(net, layout = "nicely") +
+  geom_edge_link(alpha = 0.3) +
+  geom_node_point(aes(color = bet_cen), size = nodes$bet_cen*0.15) +
+  geom_node_text(aes(label = name), repel = TRUE, alpha = 0.8) +
+  labs(title = "Betweenness Centralities",
+       colour = "Betweenness") +
+  theme_void()
+
+# print the 10 highest betweenness nodes
+nodes[order(-nodes$bet_cen),] %>%
+  select(name, bet_cen) %>%
+  head(10) %>%
+  kable() %>%
+  kable_styling(full_width = FALSE, bootstrap_options = "striped")
+```
+The gangs with the highest betweenness are *146*, *DPC*, and *St.Henri*. Comparing with degree centrality result, gangs *146* and *DPC* are confirmed as the most important, whereas the order of importance of the other gangs has changed.
+
+### HITS Centrality
+
+Finally, HITS is computed to find authorities and hubs in the network. In this context, authorities correspond to gangs on which hub gangs rely on.
+
+```{r}
+# HITS centrality
+authority <- round(authority_score(net)$vector, 2)
+hubs <- round(hub.score(net)$vector, 2)
+nodes <- mutate(nodes, a_score = authority, h_score = hubs)
+```
+
+```{r fig.align="center", out.width="100%"}
+# plotting the graph
+net <- tbl_graph(nodes = nodes, edges = edges, directed = FALSE)
+ggraph(net, layout = "nicely") +
+  geom_edge_link(alpha = 0.3) +
+  geom_node_point(aes(color = h_score, size = a_score)) +
+  geom_node_text(aes(label = name), repel = TRUE, alpha = 0.8) +
+  labs(title = "Authorities and Hubs",
+       colour = "Hubness score",
+       size = "Authority score") +
+  theme_void()
+
+# print the 10 highest-authority nodes
+nodes[order(-nodes$a_score),] %>%
+  select(name, a_score) %>%
+  head(10) %>%
+  kable() %>%
+  kable_styling(full_width = FALSE, bootstrap_options = "striped")
+```
+The gangs *146*, *DPC*, and *50 Niggaz* confirm themselves as the most important in the network.
+
+### Results
+
+```{r}
+# sorting gangs by degree
+by_deg <- nodes %>%
+  arrange(desc(deg_cen)) %>%
+  select(name)
+
+# sorting gangs by betweenness
+by_bet <- nodes %>%
+  arrange(desc(bet_cen)) %>%
+  select(name)
+
+# sorting gangs by authority
+by_aut <- nodes %>%
+  arrange(desc(a_score)) %>%
+  select(name)
+
+df <- data.frame(by_deg, by_bet, by_aut)
+colnames(df) <- c("degree", "betweenness", "authority")
+
+# visualize nicely the dataframe using kableExtra
+df %>%
+  head(5) %>%
+  kbl() %>%
+  kable_minimal()
+```
+
+Gangs **146**, **DPC**, and **50 Niggaz** are the most important of the network.
+
+
+
+
+
+## 2. Which are the most powerful gangs? Do they coincide with the most important?
+
+The centrality of a gang does not necessarily give a good indication about his power. In this context, assuming that the relationships involve some exchange of goods (like drugs, money, or simply information), it can be favorable for a gang to negotiate with those with few options. Hence, powerful actors are connected to powerless others.
+
+Power of a node increases when the larger the degree, and the smaller the power of neighbors of that node.
+
+```{r results="hide"}
+# this function checks if the graph is regularizable, if it is, returns a solution
+# it solves the linear problem
+#     B(w, r) = -d
+# where:
+#     - w >= 0
+#     - B is the incidence matrix associated to the graph,
+#       with an additional column of 1s
+#     - d is a vector of node degrees
+#     - (w, r) is a vector with weights w and regularization degree r
+#
+# graph: the graph to regularize
+# @return: a list of weights and degrees if the graph is regularizable, NULL otherwise
+regularify <- function(graph) {
+  n <- vcount(graph)
+  m <- ecount(graph)
+  # getting the edges of the graph
+  E <- get.edges(graph, E(graph))
+  # create a matrix n x m of 0s
+  B <- matrix(0, nrow = n, ncol = m)
+  # build incidence matrix
+  # b(i,l) = 1 iff vertex i belongs to edge l
+  for(i in 1:m) {
+    B[E[i, 1], i] <- 1
+    B[E[i, 2], i] <- 1
+  }
+  # objective function
+  objective_function <- rep(0, m + 1)
+  # constraint matrix
+  # attach to B a column of n -1s
+  constraint_matrix <- cbind(B, rep(-1, n))
+  # direction of constraints
+  direction <- rep("=", n)
+  # right hand side terms
+  rhs <- -degree(graph)
+  # solve the LP problem
+  solution <- lp("max", objective_function, constraint_matrix, direction, rhs)
+  # get solution
+  # if status == 0 then there is a solution
+  if(solution$status == 0) {
+    s <- solution$solution
+    # the solution will be the weights
+    w <- s[1:m] + 1
+    # weighted degree
+    d <- s[m + 1]
+  }
+  # return the solution
+  if (solution$status == 0) {
+    return(list(weights = w, degree = d)) 
+  }
+  else {
+    return(NULL)   
+  }
+}
+```
+
+```{r results="hide"}
+# if a matrix is not regularizable, then a diagonal perturbation is applied
+#     A' = A + eps I
+# where:
+#     - A is the adjacency matrix
+#     - eps is a weight
+#     - I is the diagonal matrix
+# this perturbation corresponds to add a loop with weight eps to each node
+#
+# graph: graph to perturbate
+# @return: perturbated graph
+diag_perturbation <- function(graph) {
+  A <- as_adjacency_matrix(graph)
+  I <- diag(0.15, vcount(graph))
+  return((AI <- A + I))
+}
+```
+
+```{r results="hide"}
+# A: adjacency matrix
+# t: precision
+# @return: power scores vector
+power <- function(A, t) {
+  n <- dim(A)[1]
+  # start with 0s vector for x_2k and 1s vector for x_2k+1 and x_2k+2
+  x0 <- rep(0, n)
+  x1 <- rep(1, n)
+  x2 <- rep(1, n)
+  diff <- 1
+  eps <- 1/10^t
+  while(diff > eps) {
+    x0 <- x1
+    x1 <- x2
+    x2 <- (1/x2) %*% A
+    diff <- sum(abs(x2 - x0))
+  }
+  # it holds now: alpha x2 = (1/x2) A
+  alpha <- ((1/x2) %*% A[,1]) / x2[1]
+  # hence sqrt(alpha) * x2 = (1/(sqrt(alpha) * x2)) A
+  x2 <- sqrt(alpha) %*% x2
+  return(as.vector(x2))
+}
+```
+
+```{r}
+# see if the graph is regularizable
+reg <- regularify(net)
+reg
+# the graph is not regularizable, so apply perturbation
+A <- diag_perturbation(net)
+# calculate power coefficients
+nodes <- mutate(nodes, power = round(power(A, 2), 2))
+```
+
+```{r fig.align="center", out.width="100%"}
+# plotting the graph
+net <- tbl_graph(nodes = nodes, edges = edges, directed = FALSE)
+ggraph(net, layout = "nicely") +
+  geom_edge_link(alpha = 0.3) +
+  geom_node_point(aes(color = power), size = nodes$power*0.7) +
+  geom_node_text(aes(label = name), repel=TRUE, alpha = 0.8) +
+  labs(title = "Power Scores",
+       colour = "Power") +
+  theme_void()
+
+# print the 10 most powerful nodes
+nodes[order(-nodes$power),] %>%
+  select(name, power) %>%
+  head(10) %>%
+  kable() %>%
+  kable_styling(full_width = FALSE, bootstrap_options = "striped")
+```
+
+The gangs **146** and **50 Niggaz** confirms as the most powerful of the net. It is possible to see that the gang *DPC* is not as important as centrality measures suggest.
+
+
+
+
+
+## 3. Which is the most powerful faction between *Bloods* and *Crips*?
+
+Since each gang can be affiliated with (mainly) one of the two factions, it is interesting to see which faction is the most powerful one.
+
+First, the number of gangs for each faction is computed.
+
+```{r}
+# number of gangs of each faction
+factions_count <- nodes %>%
+  group_by(allegiance) %>%
+  summarise(count = n())
+```
+
+```{r fig.align="center"}
+# visualization
+lbls <- paste(factions_count$allegiance, factions_count$count)
+pie(factions_count$count,
+    labels = lbls,
+    col = rainbow(length(factions_count$allegiance)),
+    main = "Number of Gangs per Faction")
+```
+
+This pie chart shows that the *Crips* faction is slightly more numerous than *Bloods*.
+
+Next, the cumulated power of the factions is computed.
+
+```{r}
+# cumulative power
+factions_power <- nodes %>%
+  group_by(allegiance) %>%
+  summarise(count = n(), cum_power = sum(power)) %>%
+  arrange(desc(cum_power))
+```
+
+```{r fig.align="center"}
+# visualization
+lbls <- paste(factions_power$allegiance, factions_power$cum_power)
+pie(factions_power$cum_power,
+    labels = lbls,
+    col = rainbow(length(factions_power$allegiance)),
+    main = "Cumulated Power per Faction")
+```
+
+The most powerful faction is *Crips*. The probability that, given a random gang, to be of faction *Bloods* is:
+
+```{r}
+factions_count$count[1] / vcount(net)
+```
+
+And to be of faction *Crips* is:
+
+```{r}
+factions_count$count[2] / vcount(net)
+```
+
+
+
+
+
+## 4. Are the factions divided by ethnicity of its members?
+
+Factions may be characterized by gangs of the same ethnicity. In this way, knowing the ethnicity of a gang, the police can estimate the allegiance of that gang.
+
+```{r fig.align="center"}
+ethniticies <- data.frame(faction = nodes$allegiance, ethnicity = nodes$ethnicity)
+ethniticies <- filter(ethniticies, (faction == "Bloods" | faction == "Crips") & !is.na(ethnicity))
+
+ggplot(data = ethniticies) +
+  geom_bar(mapping = aes(x = ethnicity, fill = faction), position = "dodge") +
+  labs(title = "Gangs Ethniticies",
+       x = "",
+       y = "number of gangs") +
+  theme_minimal()
+```
+
+*Bloods* faction is a quite mixed group, with a prevalence of Afro-Canadians. On the other hand, a *Crips* gang is highly likely to be composed of Afro-Canadian members.
+
+Since only the *Crips* faction has a dominant ethnicity (almost all of its gangs are Afro-Canadian), maybe the territory in which a gang operates can be a dividing characteristic for determining the factions.
+
+```{r fig.align="center"}
+territories <- data.frame(faction = nodes$allegiance, territory = nodes$territory)
+territories <- filter(territories, (faction == "Bloods" | faction == "Crips") & !is.na(territory))
+
+ggplot(data = territories) +
+  geom_bar(mapping = aes(x = territory, fill = faction), position = "dodge") +
+  labs(title = "Gangs Territories",
+       x = "",
+       y = "number of gangs") +
+  theme_minimal()
+```
+
+Both factions have their majority of gangs in the east, but only *Bloods* operate in the west and only *Crips* operate in the downtown. West and downtown gangs could be the gangs that are isolated from the main connected component, but investigating the dataset this is not the case.
+
+```{r}
+nodes %>%
+  filter(territory == "Downtown" | territory == "West") %>%
+  select(name) %>%
+  kable() %>%
+  kable_styling(full_width = FALSE, bootstrap_options = "striped")
+```
+
+
+
+
+
+## 5. Are connected gangs likely to be of the same faction?
+
+Edges in the network represent relationships between gangs. The question aims to answer if there are more relations between the same faction or between different factions. In this way, given relations between gangs, police can infer which faction do a gang support only by seeing the factions of the gangs that are in relation with it.
+
+This question can be answered using an **assortativity** measure. In this case, *modularity* is used to see if the network is assortative by allegiance, which means that gangs tend to associate with other gangs of the same faction. This measure takes positive values if there are more edges between same-type vertices than expected, and negative values if there are less.
+
+```{r results="hide"}
+# function to get NA nodes
+#
+# n: nodes vector
+# @return: a vector without NA elements
+get_na_nodes <- function(n) {
+  res <- vector()
+  for(i in 1:length(n)) {
+    if(is.na(n[i])) {
+      res <- append(res, i)
+    }
+  }
+  return(res)
+}
+```
+
+```{r}
+n <- V(net)$allegiance
+
+# delete na nodes from graph
+na_nodes <- get_na_nodes(n)
+g <- delete_vertices(net, na_nodes)
+
+# computing assorativity by allegiance
+n <- n[!is.na(n)]
+modularity(g, membership = n)
+```
+
+The modularity takes a negative, but close to 0 value. We can infer that the relationships in the network are not assortative by faction.
+
+Next, assortativity by ethnicity is tested:
+
+```{r}
+n <- V(net)$ethnicity
+
+# delete na nodes from graph
+na_nodes <- get_na_nodes(n)
+g <- delete_vertices(net, na_nodes)
+
+# computing assorativity by ethnicity
+n <- n[!is.na(n)]
+modularity(g, membership = n)
+```
+
+Also in this case, modularity take a negative value close to 0.
+
+
+
+
+
+## 6. If a gang A is in relation with gangs B and C, what is the probability that also gangs B and C are in relation?
+
+To answer this question, **transitivity coefficient** is used. This measure uses the notion of *triad*: nodes B and C both connected to a node A form a triad, closed if B and C are also connected.
+
+The transitivity coefficient corresponds to the fraction of triads that are closed, equivalently, the mean probability that two gangs in relation with a common gang are themselves in relation. Values close to 0 imply no closed triad, values close to 1 imply perfect transitivity (all nodes are in a clique).
+
+```{r}
+transitivity(net, type = "global")
+```   
+
+Hence, there is a probability of 33,6% that given two gangs B and C that are in relation with a common gang A, then also B and C are in relation.
+
+
+
+
+
+## 7. Are there communities that emerge from the network? If so, which are the leaders of those communities?
+
+This question aims to discover communities in each faction, that might coincide with alliances between gangs. If so, the most powerful gang of each community might be the leader of that group.
+
+The used measure is **modularity**: it is the number of edges that run between vertices of the same community minus the number of such edges we would expect to find if edges were positioned at random while preserving the vertex degrees.
+
+First, the highest modularity algorithm is selected:
+
+```{r}
+# choosing the highest modularity algorithm
+c_eigen <- cluster_leading_eigen(net)
+modularity(c_eigen)
+
+c_fast_greedy <- cluster_fast_greedy(net)
+modularity(c_fast_greedy)
+
+c_edge_betw <- cluster_edge_betweenness(net)
+modularity(c_edge_betw)
+
+c_rand_walks <- cluster_walktrap(net)
+modularity(c_rand_walks)
+
+c_label_prop <- cluster_label_prop(net)
+modularity(c_label_prop)
+
+c_inf <- cluster_infomap(net)
+modularity(c_inf)
+
+c_lou <- cluster_louvain(net)
+modularity(c_lou)
+
+c_opt <- cluster_optimal(net)
+modularity(c_opt)
+```
+
+The highest modularity value is given by `cluster_optimal`. This method calculates the optimal community structure for a graph, in terms of maximal modularity score. The calculation is done by transforming the modularity maximization into an integer programming problem, and then calling the `GLPK` library to solve it.
+
+Modularity optimization is an NP-complete problem, algorithms for it have exponential time complexity. This means that it's preferable to not run this function on larger graphs. According to [igraph documentation](https://igraph.org/r/doc/cluster_optimal.html), graphs with up to fifty vertices should be fine, graphs with a couple of hundred vertices might be possible.
+
+The communities found are represented by the following plot:
+
+```{r fig.align="center", out.width="100%"}
+# no margins for plot
+par(mar = rep(0,4))
+# visualization
+coords <- layout_nicely(net)
+plot(c_opt, net,
+     layout = coords,
+     vertex.label = NA,
+     vertex.size = 5.0,
+     vertex.color = membership(c_opt))
+```
+
+```{r}
+# printing sizes of detected communities
+sizes(c_opt)
+
+# adding communities information to nodes dataframe
+memberships <- as.vector(membership(c_opt))
+nodes <- cbind(nodes, community = memberships)
+```
+
+```{r results="hide"}
+# splitting the dataframe by community
+groups <- nodes %>%
+  arrange(desc(power)) %>%
+  group_split(community)
+```
+
+The created communities are:
+
+**Community 1**:
+
+```{r}
+groups[[1]]$name
+```
+
+The most powerful gang of this community is *146*.
+
+**Community 2**:
+
+```{r}
+groups[[2]]$name
+```
+
+The most powerful gang of this community is *50 Niggaz*.
+
+**Community 3**:
+
+```{r}
+groups[[3]]$name
+```
+
+The most powerful gang of this community is *DPC*.
+
+**Community 4**:
+
+```{r}
+groups[[4]]$name
+```
+
+**Community 5**:
+
+```{r}
+groups[[5]]$name
+```
+
+The most powerful gang of this community is *White_Tigers*.
+
+**Community 6**:
+
+```{r}
+groups[[6]]$name
+```
+
+Note that the most powerful gangs of each community coincide with the most powerful gangs of the whole network. The gangs **DPC**, **146**, and **50 Niggaz** control the 3 major communities of this network.
+
+A natural question after having divided the gangs into communities is to search for the most powerful one.
+
+```{r}
+# computing the most powerful community
+nodes %>%
+  group_by(community) %>%
+  summarise(count = n(), cum_power = sum(power)) %>%
+  arrange(desc(cum_power)) %>%
+  kable() %>%
+  kable_styling(full_width = FALSE, bootstrap_options = "striped")
+```
+
+Unsurprisingly, the community led by *146* with the largest number of members is also the most powerful one.
+
+Next, is investigated if the members of a community are of the same allegiance.
+
+```{r fig.align="center"}
+# visualization
+nodes %>%
+  ggplot() +
+  geom_bar(mapping = aes(x = allegiance)) +
+  facet_wrap(~community) +
+  labs(x = "") +
+  theme_minimal()
+```
+
+Communities 1 and 3 are mixed and contain gangs that are affiliated to different factions, whereas in community 2 the majority of gangs are of *Bloods*.
+
+
+
+
+
+## 8. Which gangs should the police attack to damage the most of the network?
+
+In order to reduce the criminality in Montreal, the police has to dispatch resources in an effective way. Given the situation modeled by the network, this question addresses the problem of which gangs should the police target to cause the most of the damage to all criminal organizations in the fastest way.
+
+A natural approach would be to attack the three leaders of the corresponding major groups. But this does not account for the nodes that are vital in the communication, the ones that have considerable influence within the network because they control information passing.
+
+First, connected components and the giant component are computed.
+
+```{r}
+# compute the connected components of the graph
+con_components <- components(net)
+
+# get nodes in the giant component
+nodes_in_giant <-
+    which(con_components$membership == which.max(con_components$csize))
+
+# size of the giant component
+max(con_components$csize)
+```
+
+```{r fig.align="center", out.width="100%"}
+# no margins for plot
+par(mar = rep(0,4))
+# visualize the giant component
+V(net)$color = "white"
+V(net)[nodes_in_giant]$color = "red"
+plot(net, vertex.size = 5, vertex.label=NA)
+```
+
+**Percolation** is adopted to test the robustness of the network. It is used to understand how different vertex removal strategies affect the network as a whole. Since different centrality measures have been computed, it is possible to follow different percolation strategies:
+
+* by *degree centrality*: remove first the highly connected nodes
+* by *betweenness centrality*: remove first the nodes that control information passing between others
+* by *HITS centrality*: remove first the authorities of the network
+* by *power measure*: remove first the most powerful gangs
+
+```{r results="hide"}
+# percolation removes nodes from a graph
+# and computes the size of the giant connected component
+#
+# graph: the input graph
+# size: number of nodes to remove
+# d: removal vector
+# @return: vector with sizes of giant components when nodes are removed
+percolate = function(graph, size, d) {
+  giant <- vector()
+  
+  # initial size of giant component
+  c <- components(graph)
+  giant[1] <- max(c$csize)
+  
+  # setting names to d vector as integers from 1
+  names(d) <- 1:length(d)
+  d <- sort(d, decreasing = TRUE)
+  
+  # vital nodes ids
+  vital <- as.integer(names(d[1:size]))
+  
+  # compute size of giant component after incremental removal 
+  for (i in 1:size) {
+    # remove vital nodes from graph and recalculate connected components
+    c <- components(delete_vertices(graph, vital[1:i]))
+    # store size of the new giant components
+    giant[i+1] <- max(c$csize)
+  }
+  
+  return(giant)
+}
+```
+
+```{r}
+# resilience
+size <- vcount(net)/2
+
+# by degree percolation
+deg = percolate(net, size, d = nodes$deg_cen)
+
+# by betweenness percolation
+bet = percolate(net, size, d = nodes$bet_cen)
+
+# by authority percolation
+aut = percolate(net, size, d = nodes$a_score)
+
+# by power percolation
+pow = percolate(net, size, d = nodes$power)
+```
+
+```{r fig.align="center"}
+df <- data.frame(degree = deg, betweenness = bet, authority = aut, power = pow)
+ggplot(data = df) +
+  geom_line(mapping = aes(x = 1:round(size),
+                            y = degree,
+                            color = "degree")) +
+  geom_line(mapping = aes(x = 1:round(size),
+                            y = betweenness,
+                            color = "betweenness")) +
+  geom_line(mapping = aes(x = 1:round(size), 
+                            y = authority,
+                            color = "authority")) +
+  geom_line(mapping = aes(x = 1:round(size), 
+                            y = power,
+                            color = "power")) +
+  xlab("number of removed nodes") +
+  ylab("size of giant component") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+```
+
+By the graph in figure, removing the nodes with high betweenness leads to a faster reduction of the size of the giant component. Next, a recap of the highest betweenness nodes of the network that the police should target first:
+
+```{r}
+nodes %>%
+  select(id, name, bet_cen) %>%
+  arrange(desc(bet_cen)) %>%
+  head(5) %>%
+  kable() %>%
+  kable_styling(full_width = FALSE, bootstrap_options = "striped")
+```
+
+In the following is depicted the giant component when gangs *146*, *DPC*, *St.Henri*, *AYB*, and *50 Niggaz* are removed:
+
+```{r fig.align="center", out.width="100%"}
+# delete nodes and compute the connected components of the graph
+net_deleted <- delete_vertices(net, c(2, 17, 31, 9, 6))
+c <- components(net_deleted)
+
+# get nodes in the giant component
+nodes_in_giant <-
+    which(c$membership == which.max(c$csize))
+
+# no margins for plot
+par(mar = rep(0,4))
+# visualize the giant component
+V(net_deleted)$color = "white"
+V(net_deleted)[nodes_in_giant]$color = "red"
+plot(net_deleted, vertex.size = 5, vertex.label=NA)
+```
+
+Removing those 5 gangs we reduced the giant component from 29 to 15.
+
+```{r}
+# size of giant component before removal
+max(con_components$csize)
+
+# size of giant component after removal
+max(c$csize)
+
+# percentage of nodes disconnected
+(max(con_components$csize) - max(c$csize)) * 100 / max(con_components$csize)
+```
+
+
+
+
+
+# Conclusions
+
+The performed network analysis has been very interesting, moreover, the study of some aspects has produced more information than expected.
+
+Summarizing, the analysis produced the following results:
+
+**Which are the most important gangs?**
+
+Using centrality measures, gangs *146*, *DPC*, and *50 Niggaz* turned out to be the most important ones.
+
+**Which are the most powerful gangs? Do they coincide with the most important?**
+
+Using power measurements, gangs *146*, *50 Niggaz*, and *White_Tigers* turned out to be the most powerful. Gang *DPC* is not as powerful as centrality measures suggest. This because power measures the extent to which a gang is connected to powerless gangs, in a context in which relationships involve an exchange of some goods (like drugs, money, and information). Looking at the network plot, *DPC* has a lot of connections to other powerful nodes.
+
+**Which is the most powerful faction between *Bloods* and *Crips*?**
+
+The most powerful faction is *Crips*.
+
+**Are the factions divided by ethnicity of its members?**
+
+*Bloods* faction is a mixed group, while *Crips* has mainly Afro-Canadian members. Both factions operate in the East territory of Montreal North. Downtown is controlled exclusively by *Crips*, and the West is controlled by *Bloods*.
+
+**Are connected gangs likely to be of the same faction?**
+
+Gangs are not sorted by faction, nor by ethnicity. This means that gangs do not tend to associate with other gangs of the same faction or ethnicity.
+
+**If a gang A is in relation with gangs B and C, what is the probability that also gangs B and C are in relation?**
+
+There is a probability of 33,6% that given two gangs B and C that are in relation with a common gang A, then also B and C are in relation.
+
+**Are there communities that emerge from the network? If so, which are the leaders of those communities?**
+
+From the network emerged 6 communities. The 3 most powerful and numerous groups are led by the three most important gangs: *146*, *50 Niggaz*, and *DPC*. The community led by *50 Niggaz* is composed mainly of *Bloods* gangs, while the others are mixed groups.
+
+**Which gangs should the police attack to damage the most of the network?**
+
+The attack on the gangs with the highest betweenness score disconnects the network faster. If the gangs *146*, *DPC*, *St.Henri*, *AYB*, and *50 Niggaz* are removed, then the size of the giant component drops from 29 to 15 (48%).
